@@ -498,6 +498,11 @@ void mdb_cashless_task(void *pvParameters) {
 				ble_encode_with_passkey(0x0b, item_price, item_number, payload);
 				ble_notify_send((char*) payload, sizeof(payload));
 
+				char msg[64], line[160];
+				snprintf(msg, sizeof(msg), "%lu:%u:%lld", (unsigned long) mdb_to_cents(item_price), item_number, (long long) time(NULL));
+				rpc_sign_text(msg, line, sizeof(line));
+				event_queue_push("vend_success", line);
+
 				ESP_LOGI( TAG, "VEND_SUCCESS");
 				break;
 			}
@@ -637,6 +642,8 @@ void mdb_cashless_task(void *pvParameters) {
  * Outbound — signed text "<fields>:<ts>:<hmac_hex>":
  *     sale          "<price>:<item>:<ts>:<hmac>"  on  .../sale          (cash sale)
  *     vend_request  "<price>:<item>:<ts>:<hmac>"  on  .../vend_request  (unknown-funds session: wants approve/deny)
+ *     vend_success  "<price>:<item>:<ts>:<hmac>"  on  .../vend_success  (product released)
+ *     vend_fail     "<price_mdb>,<item>:<ts>:<hmac>" on .../vend_fail  (price in MDB units)
  *     pax   "<count>:<ts>:<hmac>"         on  .../paxcounter
  *
  * BLE wire payload (phone app) — 19 bytes:
