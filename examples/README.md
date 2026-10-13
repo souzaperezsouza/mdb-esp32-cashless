@@ -66,6 +66,24 @@ idf.py flash monitor
 
 ---
 
+### `mdb-esp32s3-vmc-sim/`
+
+Bench **VMC** (vending machine controller) emulator: the bus master talking to a
+cashless reader at `0x10`, so `mdb-slave-esp32s3` can be tested without a machine.
+
+- Hardware UART2 at 9600 baud (GPIO2 TX / GPIO1 RX), 9th bit via the same parity trick as the bridge
+- RESET → SETUP (config + max/min prices) → EXPANSION ID → READER ENABLE, then POLL every 100 ms
+- Typed commands in `idf.py monitor`: `v <item> <cents>` vend, `m s|f|n` outcome, `c <item> <cents>` cash sale, `x` cancel, `e`/`d` enable/disable, `r` reset; BOOT = `v 12 350`
+- Wire straight to a bare devkit running the reader (3.3 V logic, no MDB board): GPIO2→GPIO4, GPIO1←GPIO5, GND
+
+```bash
+cd mdb-esp32s3-vmc-sim
+idf.py set-target esp32s3
+idf.py flash monitor
+```
+
+---
+
 ### `n8n-workflows/`
 
 [n8n](https://n8n.io) workflow JSON files for integrating VMflow with payment providers.
