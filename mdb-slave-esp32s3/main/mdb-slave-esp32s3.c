@@ -222,9 +222,40 @@ static QueueHandle_t mdb_rx_queue;
 void ble_encode_with_passkey(uint8_t cmd, uint16_t item_price, uint16_t item_number, uint8_t *payload);
 esp_err_t ble_decode_with_passkey(uint16_t *item_price, uint16_t *item_number, uint8_t *payload);
 
+// The clock starts near 1970 after power-up and is only right after SNTP syncs.
+// Signed events carry a ts the server checks, and the approve RPC must be fresh,
+// so cashless sales wait for the first sync.
+static volatile bool clock_synced = false;
+
+bool clock_is_synced(void) {
+	if (clock_synced) return true;
+	// A soft reboot keeps the system time: a plausible year means it is already set.
+	time_t now = time(NULL);
+	struct tm t;
+	gmtime_r(&now, &t);
+	return t.tm_year + 1900 >= 2024;
+}
+
+// Sales events: signed right away when the clock is good; otherwise queued with
+// only their fields and stamped by the event queue once SNTP syncs.
+static void push_sale_event(const char *event, const char *fields) {
+	if (clock_is_synced()) {
+		char msg[64], line[160];
+		snprintf(msg, sizeof(msg), "%s:%lld", fields, (long long) time(NULL));
+		rpc_sign_text(msg, line, sizeof(line));
+		event_queue_push(event, line);
+	} else {
+		event_queue_push_unstamped(event, fields);
+	}
+}
+
 // Queue a session with unknown funds (0xFFFF) for the next POLL, like the BLE 0x02 command.
 static void open_unknown_funds_session(void) {
 #ifdef CONFIG_ALWAYS_OPEN_SESSION
+	if (!clock_is_synced()) {
+		ESP_LOGW(TAG, "clock not set yet: the always-open session starts after the SNTP sync");
+		return;
+	}
 	uint16_t funds_available = 0xffff;
 	xQueueOverwrite(mdb_session_queue, &funds_available);
 #endif
@@ -234,6 +265,22 @@ static void drop_pending_session(void) {
 #ifdef CONFIG_ALWAYS_OPEN_SESSION
 	xQueueReset(mdb_session_queue);
 #endif
+}
+
+// SNTP callback (also called on every later periodic sync).
+static void on_time_sync(struct timeval *tv) {
+	if (clock_synced) return;
+	clock_synced = true;
+
+	char when[32];
+	struct tm t;
+	time_t now = tv->tv_sec;
+	gmtime_r(&now, &t);
+	strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S UTC", &t);
+	ESP_LOGI(TAG, "clock synced by SNTP: %s", when);
+
+	event_queue_on_clock_synced();
+	if (machine_state == ENABLED_STATE) open_unknown_funds_session();
 }
 
 static void IRAM_ATTR mdb_rx_falling_isr(void *arg) {
@@ -469,16 +516,19 @@ void mdb_cashless_task(void *pvParameters) {
 					}
 				}
 
-				if (funds_available == 0xffff) {
+				if (funds_available == 0xffff && !clock_is_synced()) {
+					// The server would reject a request with a 1970 ts: deny right away.
+					ESP_LOGW(TAG, "VEND_REQUEST denied: clock not synced yet");
+					vend_denied_todo = true;
+				} else if (funds_available == 0xffff) {
 					// Unknown funds: the server charges the customer and answers approve/deny.
 					pending_vend_price = item_price;
 					pending_vend_item = item_number;
 					pending_vend_since = uptime_s();
 
-					char msg[64], line[160];
-					snprintf(msg, sizeof(msg), "%lu:%u:%lld", (unsigned long) mdb_to_cents(item_price), item_number, (long long) time(NULL));
-					rpc_sign_text(msg, line, sizeof(line));
-					event_queue_push("vend_request", line);
+					char fields[32];
+					snprintf(fields, sizeof(fields), "%lu:%u", (unsigned long) mdb_to_cents(item_price), item_number);
+					push_sale_event("vend_request", fields);
 				}
 
 				uint8_t payload[19];
@@ -509,10 +559,9 @@ void mdb_cashless_task(void *pvParameters) {
 				ble_encode_with_passkey(0x0b, item_price, item_number, payload);
 				ble_notify_send((char*) payload, sizeof(payload));
 
-				char msg[64], line[160];
-				snprintf(msg, sizeof(msg), "%lu:%u:%lld", (unsigned long) mdb_to_cents(item_price), item_number, (long long) time(NULL));
-				rpc_sign_text(msg, line, sizeof(line));
-				event_queue_push("vend_success", line);
+				char fields[32];
+				snprintf(fields, sizeof(fields), "%lu:%u", (unsigned long) mdb_to_cents(item_price), item_number);
+				push_sale_event("vend_success", fields);
 
 				ESP_LOGI( TAG, "VEND_SUCCESS");
 				break;
@@ -526,10 +575,9 @@ void mdb_cashless_task(void *pvParameters) {
 				ble_encode_with_passkey(0x0c, item_price, item_number, payload);
 				ble_notify_send((char*) payload, sizeof(payload));
 
-                char msg[64], line[160];
-                snprintf(msg, sizeof(msg), "%u,%u:%lld", item_price, item_number, (long long) time(NULL));
-                rpc_sign_text(msg, line, sizeof(line));
-                event_queue_push("vend_fail", line);
+                char fields[32];
+                snprintf(fields, sizeof(fields), "%u,%u", item_price, item_number);
+                push_sale_event("vend_fail", fields);
 
 				break;
 			}
@@ -553,10 +601,10 @@ void mdb_cashless_task(void *pvParameters) {
 
 				uint32_t price_wire = mdb_to_cents(item_price);
 
-				char msg[64], line[160];
-				snprintf(msg, sizeof(msg), "%lu:%u:%lld", (unsigned long) price_wire, item_number, (long long) time(NULL));
-				rpc_sign_text(msg, line, sizeof(line));
-				event_queue_push("sale", line);
+				// Before the first SNTP sync the sale is kept unstamped and signed once the clock is right.
+				char fields[32];
+				snprintf(fields, sizeof(fields), "%lu:%u", (unsigned long) price_wire, item_number);
+				push_sale_event("sale", fields);
 
 				ESP_LOGI( TAG, "CASH_SALE");
 				break;
@@ -874,6 +922,7 @@ static void rpc_publish_info(void) {
 		"\"last_sale_price\":%u,\"last_sale_item\":%u,"
 		"\"last_vend_success_time\":%lld,"
 		"\"events_pending\":%lu,\"events_dropped\":%lu,"
+		"\"clock_synced\":%s,\"time\":%lld,"
 		"\"ip_wifi\":\"%s\",\"ip_ppp\":\"%s\"}",
 		app->version,
 		(long long) (esp_timer_get_time() / 1000000),
@@ -883,6 +932,7 @@ static void rpc_publish_info(void) {
 		last_sale_price, last_sale_item,
 		(long long) last_vend_success_time,
 		(unsigned long) event_queue_pending(), (unsigned long) event_queue_dropped(),
+		clock_is_synced() ? "true" : "false", (long long) time(NULL),
 		s_ip_wifi, s_ip_ppp);
 
 	mqtt_topic(topic, sizeof(topic), "rpc/info");
@@ -1279,6 +1329,7 @@ void app_main(void) {
     //----------------------------------------------------------//
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_set_time_sync_notification_cb(on_time_sync);
     esp_sntp_init();
 
 	//------------------------ BLUETOOTH -----------------------//

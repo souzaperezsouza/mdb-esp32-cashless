@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -9,22 +10,27 @@
 #include <mqtt_client.h>
 
 #include "event-queue.h"
+#include "rpc-auth.h"
 
 #define TAG "event_queue"
 
 #define EVENT_LEN       16
 #define LINE_LEN        128
+#define STORED_LEN      (EVENT_LEN + LINE_LEN + 32)   // event, tab, optional ~<boot>,<uptime> and tab, line
 #define RESEND_AFTER_US (30 * 1000000LL)   // no PUBACK in 30 s while connected: publish again
 
 // Owned by the main translation unit.
 extern esp_mqtt_client_handle_t mqtt_client;
 extern void mqtt_topic(char *buf, size_t size, const char *event);
+extern bool clock_is_synced(void);
 
-typedef enum { MSG_NEW, MSG_CONNECTED, MSG_DISCONNECTED, MSG_PUBLISHED } msg_type_t;
+typedef enum { MSG_NEW, MSG_CONNECTED, MSG_DISCONNECTED, MSG_PUBLISHED, MSG_CLOCK } msg_type_t;
 
 typedef struct {
 	msg_type_t type;
 	int msg_id;
+	bool stamped;          // false: line holds only the fields; ts and HMAC come after SNTP syncs
+	uint32_t uptime_s;     // when the event happened (monotonic), to rebuild its real time later
 	char event[EVENT_LEN];
 	char line[LINE_LEN];
 } queue_msg_t;
@@ -40,9 +46,14 @@ static QueueHandle_t msg_queue;
 static nvs_handle_t nvs;
 static uint32_t head, tail;     // pending events are the NVS keys e<head>..e<tail-1>
 static uint32_t dropped;
+static uint32_t boot_id;        // incremented every boot; uptime is only meaningful within one boot
 static bool connected;
 static inflight_t inflight[CONFIG_EVENT_QUEUE_MAX];
 static int inflight_n;
+
+static uint32_t uptime_s(void) {
+	return (uint32_t) (esp_timer_get_time() / 1000000);
+}
 
 static void key_for(uint32_t seq, char *key) {
 	snprintf(key, 16, "e%08lx", (unsigned long) seq);
@@ -77,18 +88,46 @@ static void advance_head(void) {
 }
 
 static void publish(uint32_t seq) {
-	char key[16], stored[EVENT_LEN + LINE_LEN + 1], topic[96];
+	char key[16], stored[STORED_LEN], topic[96];
 	size_t len = sizeof(stored);
 	key_for(seq, key);
 	if (nvs_get_str(nvs, key, stored, &len) != ESP_OK) return;
 
-	// Stored as "<event>\t<signed line>".
+	// Stored as "<event>\t<signed line>", or "<event>\t~<boot>,<uptime_s>\t<fields>" when
+	// it happened before the clock was set.
 	char *tab = strchr(stored, '\t');
 	if (tab == NULL) return;
 	*tab = '\0';
+	char *line = tab + 1;
+	char stamped[LINE_LEN];
+
+	if (line[0] == '~') {
+		if (!clock_is_synced()) return;   // stays queued until SNTP syncs
+
+		unsigned long boot, uptime;
+		char *fields = strchr(line, '\t');
+		if (fields == NULL || sscanf(line + 1, "%lu,%lu", &boot, &uptime) != 2) return;
+
+		// Same boot: rebuild the moment of the sale. Rebooted since: best we can do is now.
+		time_t ts = time(NULL);
+		uint32_t now_up = uptime_s();
+		if (boot == boot_id && now_up >= uptime) ts -= (time_t) (now_up - uptime);
+
+		char msg[96];
+		snprintf(msg, sizeof(msg), "%s:%lld", fields + 1, (long long) ts);
+		rpc_sign_text(msg, stamped, sizeof(stamped));
+
+		// Persist the stamped line before publishing: every resend must carry the same payload.
+		char rewritten[STORED_LEN];
+		snprintf(rewritten, sizeof(rewritten), "%.15s\t%s", stored, stamped);
+		nvs_set_str(nvs, key, rewritten);
+		nvs_commit(nvs);
+		ESP_LOGI(TAG, "event %lu (%s) stamped after clock sync: ts=%lld", (unsigned long) seq, stored, (long long) ts);
+		line = stamped;
+	}
 	mqtt_topic(topic, sizeof(topic), stored);
 
-	int msg_id = esp_mqtt_client_enqueue(mqtt_client, topic, tab + 1, 0, 1, 0, true);
+	int msg_id = esp_mqtt_client_enqueue(mqtt_client, topic, line, 0, 1, 0, true);
 	if (msg_id < 0) {
 		ESP_LOGW(TAG, "outbox full, event %lu stays queued", (unsigned long) seq);
 		return;
@@ -99,8 +138,8 @@ static void publish(uint32_t seq) {
 	if (i >= 0) inflight[i] = (inflight_t) { .seq = seq, .msg_id = msg_id, .sent_us = esp_timer_get_time() };
 }
 
-static void store(const char *event, const char *line) {
-	char key[16], stored[EVENT_LEN + LINE_LEN + 1];
+static void store(const char *event, const char *line, bool stamped, uint32_t uptime) {
+	char key[16], stored[STORED_LEN];
 
 	if (tail - head >= CONFIG_EVENT_QUEUE_MAX) {
 		// Full: drop the oldest. The daily DEX audit still counts the sale.
@@ -115,11 +154,14 @@ static void store(const char *event, const char *line) {
 		advance_head();
 	}
 
-	snprintf(stored, sizeof(stored), "%s\t%s", event, line);
+	if (stamped)
+		snprintf(stored, sizeof(stored), "%.15s\t%s", event, line);
+	else
+		snprintf(stored, sizeof(stored), "%.15s\t~%lu,%lu\t%s", event, (unsigned long) boot_id, (unsigned long) uptime, line);
 	key_for(tail, key);
 	if (nvs_set_str(nvs, key, stored) != ESP_OK) {
 		ESP_LOGE(TAG, "NVS write failed, event %s sent without persistence", event);
-		if (connected) {
+		if (connected && stamped) {
 			char topic[96];
 			mqtt_topic(topic, sizeof(topic), event);
 			esp_mqtt_client_enqueue(mqtt_client, topic, line, 0, 1, 0, true);
@@ -158,7 +200,10 @@ static void publish_pending(bool only_stale) {
 static void handle_msg(const queue_msg_t *msg) {
 	switch (msg->type) {
 	case MSG_NEW:
-		store(msg->event, msg->line);
+		store(msg->event, msg->line, msg->stamped, msg->uptime_s);
+		break;
+	case MSG_CLOCK:
+		if (connected) publish_pending(false);   // events recorded before the sync can go now
 		break;
 	case MSG_CONNECTED:
 		connected = true;
@@ -196,22 +241,34 @@ void event_queue_init(void) {
 	nvs_get_u32(nvs, "head", &head);
 	nvs_get_u32(nvs, "tail", &tail);
 	nvs_get_u32(nvs, "drop", &dropped);
+	nvs_get_u32(nvs, "boot", &boot_id);
+	boot_id++;
+	nvs_set_u32(nvs, "boot", boot_id);
+	nvs_commit(nvs);
 	advance_head();
 	ESP_LOGI(TAG, "%lu event(s) pending from before boot", (unsigned long) (tail - head));
 
 	xTaskCreatePinnedToCore(event_queue_task, "event_queue", 4096, NULL, 3, NULL, 0);
 }
 
-bool event_queue_push(const char *event, const char *signed_line) {
-	queue_msg_t msg = { .type = MSG_NEW };
+static bool push_msg(const char *event, const char *text, bool stamped) {
+	queue_msg_t msg = { .type = MSG_NEW, .stamped = stamped, .uptime_s = uptime_s() };
 	strlcpy(msg.event, event, sizeof(msg.event));
-	strlcpy(msg.line, signed_line, sizeof(msg.line));
+	strlcpy(msg.line, text, sizeof(msg.line));
 	if (xQueueSend(msg_queue, &msg, 0) != pdTRUE) {
 		dropped++;
 		ESP_LOGE(TAG, "RAM queue full, event %s dropped", event);
 		return false;
 	}
 	return true;
+}
+
+bool event_queue_push(const char *event, const char *signed_line) {
+	return push_msg(event, signed_line, true);
+}
+
+bool event_queue_push_unstamped(const char *event, const char *fields) {
+	return push_msg(event, fields, false);
 }
 
 static void notify(msg_type_t type, int msg_id) {
@@ -222,6 +279,7 @@ static void notify(msg_type_t type, int msg_id) {
 void event_queue_on_connected(void)       { notify(MSG_CONNECTED, 0); }
 void event_queue_on_disconnected(void)    { notify(MSG_DISCONNECTED, 0); }
 void event_queue_on_published(int msg_id) { notify(MSG_PUBLISHED, msg_id); }
+void event_queue_on_clock_synced(void)    { notify(MSG_CLOCK, 0); }
 
 uint32_t event_queue_pending(void) { return tail - head; }
 uint32_t event_queue_dropped(void) { return dropped; }

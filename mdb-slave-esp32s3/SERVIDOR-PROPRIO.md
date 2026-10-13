@@ -13,6 +13,7 @@ preciso pra um servidor seu aprovar cada venda:
 | Publica `vend_request` e `vend_success` | MQTT |
 | Comandos `approve:<centavos>` e `deny` | RPC |
 | Nega sozinho se ninguém aprovar | `CONFIG_VEND_APPROVAL_TIMEOUT_SEC` |
+| Sem venda cashless antes do relógio acertar; venda em dinheiro carimbada depois do SNTP | `clock_is_synced()`, `event_queue_push_unstamped()` |
 | OTA desligado ou apontando pro seu repositório | menu **OTA** |
 
 ## Fluxo de uma venda
@@ -41,7 +42,7 @@ Assinadas: `<campos>:<ts>:<hmac>`, hmac = HMAC-SHA256(passkey, tudo antes do úl
 | `<prefixo>/<sub>/sale` | `<centavos>:<selecao>:<ts>:<hmac>` (venda em dinheiro) |
 | `<prefixo>/<sub>/status` | `online,<reset_reason>` / `offline` (last will), retidos, **não** assinados |
 | `<prefixo>/<sub>/rpc/confirm` | `ok` / `fail`, **não** assinado |
-| `<prefixo>/<sub>/rpc/info` | JSON; agora com `events_pending` e `events_dropped` |
+| `<prefixo>/<sub>/rpc/info` | JSON; agora com `events_pending`, `events_dropped`, `clock_synced` e `time` |
 
 Comandos (tópico `<prefixo_rpc>/<sub>/rpc`, `<cmd>:<args>:<ts>:<hmac>`, ts com no
 máximo 10 s de diferença do relógio da placa):
@@ -56,6 +57,25 @@ máximo 10 s de diferença do relógio da placa):
 Padrões: `<prefixo>` = `maquinas`, `<prefixo_rpc>` = `cmd`, usuário MQTT = subdomain
 da placa. No servidor (`bot_vending`): `MQTT_TOPICO_SAIDA=maquinas/{sub}`,
 `MQTT_TOPICO_RPC=cmd/{sub}/rpc`, e no broker `MQTT_PREFIXO_SAIDA=maquinas`.
+
+## Relógio (SNTP)
+
+Depois de ligar, o relógio da placa marca 1970 até o SNTP sincronizar. Um `ts` de
+1970 é rejeitado pelo servidor (`ts_fora_janela`), e o `approve` também depende do
+relógio. Por isso:
+
+- A **sessão sempre aberta só abre depois do sync**. Se a máquina habilitar o leitor
+  antes, a sessão abre no momento do sync. Enquanto isso, um VEND_REQUEST com saldo
+  desconhecido é negado na hora.
+- **Venda em dinheiro antes do sync** vai pra fila sem `ts` e sem assinatura, junto com
+  o uptime da placa. Depois do sync, a fila calcula a hora real da venda
+  (`agora − (uptime agora − uptime da venda)`), assina, **regrava a linha na NVS** e só
+  então publica. Os reenvios saem idênticos e o servidor deduplica.
+- Se a placa **reiniciar antes do sync**, o uptime antigo perde o sentido: a venda leva a
+  hora do sync (o horário fica errado, mas a venda não se perde; a conferência do DEX
+  é por contador, não por horário).
+- O log mostra `clock synced by SNTP: <data> UTC`; o `rpc/info` traz `clock_synced` e
+  `time`.
 
 ## Compilar e gravar
 
@@ -141,6 +161,8 @@ níveis são outros.
 | Sessão reabre | após qualquer venda | `END SESSION` seguido de `BEGIN SESSION (funds unknown...)` |
 | Fila offline | desligue o Wi-Fi/broker, faça `c 12 350` duas vezes, reinicie o leitor, religue o broker | os dois `sale` chegam depois; `rpc/info` mostra `events_pending` voltando a 0 |
 | Leitor desabilitado | `d`, depois `e` | sem sessão enquanto desabilitado; reabre no `e` |
+| Venda antes do relógio | desligue o roteador/broker, tire o leitor da energia e ligue de novo (reset por software mantém a hora; sem energia ela volta a 1970 e, sem internet, não há SNTP), espere o VMC simulado habilitar, faça `c 12 350`, anote a hora, espere 2 min e religue a internet | log `clock synced by SNTP`; o `sale` chega com o `ts` da hora em que você fez a venda (não a do sync); `BEGIN SESSION (funds unknown)` só aparece depois do sync |
+| Pedido antes do relógio | sem internet, depois de ligar a placa: `v 12 350` | `VEND DENIED` na hora, nenhum `vend_request` publicado |
 
 O DEX usa outra porta (GPIO8/9) e não é coberto por esse simulador.
 

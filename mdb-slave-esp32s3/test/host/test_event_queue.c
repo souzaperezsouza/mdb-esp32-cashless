@@ -76,6 +76,19 @@ int esp_mqtt_client_enqueue(esp_mqtt_client_handle_t c, const char *topic, const
 }
 void mqtt_topic(char *buf, size_t size, const char *event) { snprintf(buf, size, "maquinas/42/%s", event); }
 
+// Clock and signing (the real ones live in mdb-slave-esp32s3.c / rpc-auth.c).
+static bool fake_clock_synced = true;
+bool clock_is_synced(void) { return fake_clock_synced; }
+void rpc_sign_text(const char *msg, char *out, size_t out_sz) { snprintf(out, out_sz, "%s:SIG", msg); }
+
+// "maquinas/42/sale 350:12:<ts>:SIG" -> ts
+static long long ts_of(const char *published_line) {
+	const char *end = strrchr(published_line, ':');
+	const char *p = end - 1;
+	while (p > published_line && *p != ':') p--;
+	return atoll(p + 1);
+}
+
 // ── helpers ─────────────────────────────────────────────────────────────────
 static void drain(void) {
 	for (int i = 0; i < fake_q_n; i++) handle_msg(&fake_q[i]);
@@ -170,6 +183,52 @@ int main(void) {
 	connect();
 	CHECK(published_n == before + 4);
 	CHECK(!strcmp(published[before], "maquinas/42/sale 100:2:4000:ff"));   // 0 and 1 were dropped
+
+	// 7. Cash sale before SNTP sync: kept unstamped, not published even while connected.
+	//    After the sync it is stamped with the REAL moment (now - elapsed uptime),
+	//    saved stamped, and every resend carries exactly the same line.
+	for (int i = 0; i < 4; i++) puback(next_msg_id - 1 - i);   // drain scenario 6
+	CHECK(event_queue_pending() == 0);
+	fake_clock_synced = false;
+	clock_us = 1000LL * 1000000;                                // uptime 1000 s at the sale
+	before = published_n;
+	event_queue_push_unstamped("sale", "350:12"); drain();
+	CHECK(published_n == before && event_queue_pending() == 1);
+	tick();
+	CHECK(published_n == before);                               // still no clock
+
+	clock_us += 100LL * 1000000;                                // clock syncs 100 s later
+	fake_clock_synced = true;
+	event_queue_on_clock_synced(); drain();
+	CHECK(published_n == before + 1);
+	long long agora = (long long) time(NULL);
+	long long ts = ts_of(published[before]);
+	CHECK(ts >= agora - 101 && ts <= agora - 99);
+	CHECK(!strncmp(published[before], "maquinas/42/sale 350:12:", 24));
+	char primeira[200];
+	strcpy(primeira, published[before]);
+	disconnect();
+	connect();                                                  // no PUBACK yet: resent
+	CHECK(!strcmp(published[published_n - 1], primeira));      // identical payload
+	puback(next_msg_id - 1);
+	CHECK(event_queue_pending() == 0);
+
+	// 8. Sale before sync, then a REBOOT before the sync: uptime from the old
+	//    boot is meaningless, so it is stamped with the sync moment.
+	fake_clock_synced = false;
+	clock_us = 5000LL * 1000000;
+	event_queue_push_unstamped("sale", "200:7"); drain();
+	reboot();
+	clock_us = 30LL * 1000000;
+	connect();
+	CHECK(event_queue_pending() == 1);
+	fake_clock_synced = true;
+	event_queue_on_clock_synced(); drain();
+	ts = ts_of(published[published_n - 1]);
+	agora = (long long) time(NULL);
+	CHECK(ts >= agora - 1 && ts <= agora + 1);
+	puback(next_msg_id - 1);
+	CHECK(event_queue_pending() == 0);
 
 	printf("event-queue: todos os testes passaram\n");
 	return 0;
