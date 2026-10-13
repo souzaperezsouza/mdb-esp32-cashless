@@ -201,7 +201,12 @@ time_t   last_vend_success_time = 0;
 // the MDB task, read by the MQTT task when approve/deny arrives.
 volatile uint16_t pending_vend_price = 0;   // MDB units
 volatile uint16_t pending_vend_item = 0;
-volatile time_t   pending_vend_since = 0;   // 0 = nothing pending
+volatile uint32_t pending_vend_since = 0;   // uptime_s() of the request; 0 = nothing pending
+
+// Monotonic seconds (+1 so it is never 0). time() jumps when SNTP syncs.
+static uint32_t uptime_s(void) {
+	return (uint32_t) (esp_timer_get_time() / 1000000) + 1;
+}
 
 static char s_ip_wifi[16] = "";
 static char s_ip_ppp[16]  = "";
@@ -435,6 +440,12 @@ void mdb_cashless_task(void *pvParameters) {
 				if (!waits_forever && machine_state >= IDLE_STATE && (now - session_begin_time) > 60) {
 					session_cancel_todo = true;
 				}
+
+				if (machine_state == VEND_STATE && pending_vend_since != 0
+						&& uptime_s() - pending_vend_since > CONFIG_VEND_APPROVAL_TIMEOUT_SEC) {
+					ESP_LOGW(TAG, "no approve/deny in %d s, denying the vend", CONFIG_VEND_APPROVAL_TIMEOUT_SEC);
+					vend_denied_todo = true;
+				}
 			}
 
 			break;
@@ -462,7 +473,7 @@ void mdb_cashless_task(void *pvParameters) {
 					// Unknown funds: the server charges the customer and answers approve/deny.
 					pending_vend_price = item_price;
 					pending_vend_item = item_number;
-					pending_vend_since = time(NULL);
+					pending_vend_since = uptime_s();
 
 					char msg[64], line[160];
 					snprintf(msg, sizeof(msg), "%lu:%u:%lld", (unsigned long) mdb_to_cents(item_price), item_number, (long long) time(NULL));

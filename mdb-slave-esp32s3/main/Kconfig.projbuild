@@ -80,6 +80,16 @@ menu "MDB Cashless Device"
             timeout does not apply to this session. The "credit" RPC has no
             effect while this is enabled.
 
+    config VEND_APPROVAL_TIMEOUT_SEC
+        int "Deny a VEND_REQUEST nobody approved after (seconds)"
+        default 70
+        range 10 600
+        help
+            With funds unknown the device waits for approve/deny from the
+            server. If neither arrives in time (server or internet down), the
+            device denies on its own so the machine is not stuck. Keep it a
+            bit above the server's own approval timeout.
+
 endmenu # MDB Cashless Device
 
 menu "MQTT Server"
