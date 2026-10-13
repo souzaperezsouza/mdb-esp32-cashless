@@ -210,6 +210,20 @@ static QueueHandle_t mdb_rx_queue;
 void ble_encode_with_passkey(uint8_t cmd, uint16_t item_price, uint16_t item_number, uint8_t *payload);
 esp_err_t ble_decode_with_passkey(uint16_t *item_price, uint16_t *item_number, uint8_t *payload);
 
+// Queue a session with unknown funds (0xFFFF) for the next POLL, like the BLE 0x02 command.
+static void open_unknown_funds_session(void) {
+#ifdef CONFIG_ALWAYS_OPEN_SESSION
+	uint16_t funds_available = 0xffff;
+	xQueueOverwrite(mdb_session_queue, &funds_available);
+#endif
+}
+
+static void drop_pending_session(void) {
+#ifdef CONFIG_ALWAYS_OPEN_SESSION
+	xQueueReset(mdb_session_queue);
+#endif
+}
+
 static void IRAM_ATTR mdb_rx_falling_isr(void *arg) {
     gpio_intr_disable(PIN_MDB_RX);
 
@@ -295,6 +309,7 @@ void mdb_cashless_task(void *pvParameters) {
 
 			cashless_reset_todo = true;
 			machine_state = INACTIVE_STATE;
+			drop_pending_session();
 
 			xEventGroupClearBits(xLedEventGroup, BIT_STATUS_MDB);
 			xEventGroupSetBits(xLedEventGroup, BIT_STATUS_TRIGGER);
@@ -391,6 +406,8 @@ void mdb_cashless_task(void *pvParameters) {
 				available_tx = 1;
 				machine_state = ENABLED_STATE;
 
+				open_unknown_funds_session();
+
 			} else if (out_of_sequence_todo) {
 				out_of_sequence_todo = false;
 
@@ -400,7 +417,13 @@ void mdb_cashless_task(void *pvParameters) {
 			} else {
 				time_t now = time(NULL);
 
-				if (machine_state >= IDLE_STATE && (now - session_begin_time) > 60) {
+#ifdef CONFIG_ALWAYS_OPEN_SESSION
+				// The always-open session waits for the customer indefinitely.
+				bool waits_forever = (funds_available == 0xffff);
+#else
+				bool waits_forever = false;
+#endif
+				if (!waits_forever && machine_state >= IDLE_STATE && (now - session_begin_time) > 60) {
 					session_cancel_todo = true;
 				}
 			}
@@ -514,6 +537,7 @@ void mdb_cashless_task(void *pvParameters) {
 				if (read_9(NULL) != checksum) continue;
 
 				machine_state = DISABLED_STATE;
+				drop_pending_session();
 
 				xEventGroupClearBits(xLedEventGroup, BIT_STATUS_MDB);
 				xEventGroupSetBits(xLedEventGroup, BIT_STATUS_TRIGGER);
@@ -524,6 +548,7 @@ void mdb_cashless_task(void *pvParameters) {
 				if (read_9(NULL) != checksum) continue;
 
 				machine_state = ENABLED_STATE;
+				open_unknown_funds_session();
 
 				xEventGroupSetBits(xLedEventGroup, BIT_STATUS_MDB | BIT_STATUS_TRIGGER);
 

@@ -69,6 +69,17 @@ menu "MDB Cashless Device"
         default 2
         range 0 3
 
+    config ALWAYS_OPEN_SESSION
+        bool "Keep a session with unknown funds always open"
+        default y
+        help
+            When the machine enables the reader, and again after every session
+            ends, open a session with funds 0xFFFF (same as the BLE 0x02
+            command). The machine then accepts a selection at any time and each
+            VEND_REQUEST waits for an approve/deny from the server. The 60 s idle
+            timeout does not apply to this session. The "credit" RPC has no
+            effect while this is enabled.
+
 endmenu # MDB Cashless Device
 
 menu "MQTT Server"
