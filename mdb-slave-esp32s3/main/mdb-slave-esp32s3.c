@@ -8,7 +8,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 #include <time.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -55,8 +54,30 @@
 #define PIN_SIM7080G_PWR    GPIO_NUM_14
 #define PIN_BUZZER_PWR      GPIO_NUM_12
 
-#define TO_SCALE_FACTOR(p, scale_to, dec_to) (p / scale_to / pow(10, -(dec_to) ))
-#define FROM_SCALE_FACTOR(p, scale_from, dec_from) (p * scale_from * pow(10, -(dec_from) ))
+// MDB value <-> cents. One MDB unit is SCALE_FACTOR x 10^-DECIMAL_PLACES of the
+// currency. Integer math on purpose: the old double-based TO/FROM_SCALE_FACTOR
+// macros truncated (with scale 1 / 2 decimals, 205 cents came out as 204).
+static uint32_t pow10_u32(uint8_t n) {
+	uint32_t r = 1;
+	while (n--) r *= 10;
+	return r;
+}
+
+static uint32_t mdb_to_cents(uint32_t value) {
+#if CONFIG_MDB_DECIMAL_PLACES <= 2
+	return value * CONFIG_MDB_SCALE_FACTOR * pow10_u32(2 - CONFIG_MDB_DECIMAL_PLACES);
+#else
+	return value * CONFIG_MDB_SCALE_FACTOR / pow10_u32(CONFIG_MDB_DECIMAL_PLACES - 2);
+#endif
+}
+
+static uint32_t cents_to_mdb(uint32_t cents) {
+#if CONFIG_MDB_DECIMAL_PLACES <= 2
+	return cents / (CONFIG_MDB_SCALE_FACTOR * pow10_u32(2 - CONFIG_MDB_DECIMAL_PLACES));
+#else
+	return cents * pow10_u32(CONFIG_MDB_DECIMAL_PLACES - 2) / CONFIG_MDB_SCALE_FACTOR;
+#endif
+}
 
 // Big-endian (de)serialization helpers for the BLE wire payload.
 static inline uint32_t read_u32(const uint8_t *p) {
@@ -471,7 +492,7 @@ void mdb_cashless_task(void *pvParameters) {
 
 				if (read_9(NULL) != checksum) continue;
 
-				uint32_t price_wire = TO_SCALE_FACTOR( FROM_SCALE_FACTOR(item_price, CONFIG_MDB_SCALE_FACTOR, CONFIG_MDB_DECIMAL_PLACES), 1, 2);
+				uint32_t price_wire = mdb_to_cents(item_price);
 
 				char topic[TOPIC_LEN], msg[64], line[160];
 				snprintf(msg, sizeof(msg), "%lu:%u:%lld", (unsigned long) price_wire, item_number, (long long) time(NULL));
@@ -600,7 +621,7 @@ esp_err_t ble_decode_with_passkey(uint16_t *item_price, uint16_t *item_number, u
     int32_t item_price_32 = read_u32(&payload[1]);
 
     if(item_price)
-        *item_price = TO_SCALE_FACTOR( FROM_SCALE_FACTOR(item_price_32, 1, 2), CONFIG_MDB_SCALE_FACTOR, CONFIG_MDB_DECIMAL_PLACES);
+        *item_price = cents_to_mdb(item_price_32);
 
     if(item_number)
         *item_number = read_u16(&payload[5]);
@@ -609,7 +630,7 @@ esp_err_t ble_decode_with_passkey(uint16_t *item_price, uint16_t *item_number, u
 }
 
 void ble_encode_with_passkey(uint8_t cmd, uint16_t item_price, uint16_t item_number, uint8_t *payload) {
-    uint32_t item_price_32 = TO_SCALE_FACTOR( FROM_SCALE_FACTOR(item_price, CONFIG_MDB_SCALE_FACTOR, CONFIG_MDB_DECIMAL_PLACES), 1, 2);
+    uint32_t item_price_32 = mdb_to_cents(item_price);
 
 	time_t now = time(NULL);
 
@@ -885,13 +906,13 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 				ESP_LOGI(TAG, "RPC info published");
 			} else if (strcmp(cmd, "credit") == 0 && has_args) {
 				int32_t price_wire = (int32_t) strtol(args, NULL, 10);
-				uint16_t funds_available = TO_SCALE_FACTOR( FROM_SCALE_FACTOR(price_wire, 1, 2), CONFIG_MDB_SCALE_FACTOR, CONFIG_MDB_DECIMAL_PLACES);
+				uint16_t funds_available = cents_to_mdb(price_wire);
 
 				xQueueSend(mdb_session_queue, &funds_available, 0);
 				xEventGroupSetBits(xLedEventGroup, BIT_STATUS_BUZZER | BIT_STATUS_TRIGGER);
 
                 esp_mqtt_client_enqueue(mqtt_client, topic_confirm, "ok", 0, 1, 0, 1);
-				ESP_LOGI( TAG, "RPC credit: Amount= %f", FROM_SCALE_FACTOR(funds_available, CONFIG_MDB_SCALE_FACTOR, CONFIG_MDB_DECIMAL_PLACES) );
+				ESP_LOGI( TAG, "RPC credit: Amount= %lu cents", (unsigned long) mdb_to_cents(funds_available) );
 			} else if (strcmp(cmd, "oos") == 0) {
 				out_of_sequence_todo = true;
 
