@@ -113,6 +113,16 @@ menu "MQTT Server"
             The device subscribes to <prefix>/<subdomain>/# and runs the
             signed commands published on <prefix>/<subdomain>/rpc.
 
+    config EVENT_QUEUE_MAX
+        int "Max sales events kept in flash until the broker acknowledges them"
+        default 32
+        range 8 64
+        help
+            sale, vend_request, vend_success and vend_fail are stored in NVS and
+            removed only after the QoS 1 PUBACK. When full, the oldest is dropped
+            (counted in rpc/info as events_dropped). Each event takes ~5 NVS
+            entries; the default 24 KB NVS partition holds about 600.
+
 endmenu # MQTT Server
 
 menu "SIM7080G"

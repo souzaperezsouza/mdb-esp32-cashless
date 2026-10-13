@@ -37,6 +37,7 @@
 #include "nimble.h"
 #include "eva-dts.h"
 #include "rpc-auth.h"
+#include "event-queue.h"
 
 #define TAG "mdb_cashless"
 
@@ -489,11 +490,10 @@ void mdb_cashless_task(void *pvParameters) {
 				ble_encode_with_passkey(0x0c, item_price, item_number, payload);
 				ble_notify_send((char*) payload, sizeof(payload));
 
-                char topic[TOPIC_LEN], msg[64], line[160];
+                char msg[64], line[160];
                 snprintf(msg, sizeof(msg), "%u,%u:%lld", item_price, item_number, (long long) time(NULL));
                 rpc_sign_text(msg, line, sizeof(line));
-                mqtt_topic(topic, sizeof(topic), "vend_fail");
-                esp_mqtt_client_enqueue(mqtt_client, topic, line, 0, 1, 0, 1);
+                event_queue_push("vend_fail", line);
 
 				break;
 			}
@@ -517,12 +517,10 @@ void mdb_cashless_task(void *pvParameters) {
 
 				uint32_t price_wire = mdb_to_cents(item_price);
 
-				char topic[TOPIC_LEN], msg[64], line[160];
+				char msg[64], line[160];
 				snprintf(msg, sizeof(msg), "%lu:%u:%lld", (unsigned long) price_wire, item_number, (long long) time(NULL));
 				rpc_sign_text(msg, line, sizeof(line));
-
-				mqtt_topic(topic, sizeof(topic), "sale");
-				esp_mqtt_client_enqueue(mqtt_client, topic, line, 0, 1, 0, 1);
+				event_queue_push("sale", line);
 
 				ESP_LOGI( TAG, "CASH_SALE");
 				break;
@@ -834,6 +832,7 @@ static void rpc_publish_info(void) {
 		"\"free_heap\":%lu,\"min_free_heap\":%lu,\"machine_state\":%d,"
 		"\"last_sale_price\":%u,\"last_sale_item\":%u,"
 		"\"last_vend_success_time\":%lld,"
+		"\"events_pending\":%lu,\"events_dropped\":%lu,"
 		"\"ip_wifi\":\"%s\",\"ip_ppp\":\"%s\"}",
 		app->version,
 		(long long) (esp_timer_get_time() / 1000000),
@@ -842,6 +841,7 @@ static void rpc_publish_info(void) {
 		(int) machine_state,
 		last_sale_price, last_sale_item,
 		(long long) last_vend_success_time,
+		(unsigned long) event_queue_pending(), (unsigned long) event_queue_dropped(),
 		s_ip_wifi, s_ip_ppp);
 
 	mqtt_topic(topic, sizeof(topic), "rpc/info");
@@ -866,8 +866,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
         xEventGroupSetBits(xLedEventGroup, BIT_STATUS_MQTT | BIT_STATUS_TRIGGER);
 
+        event_queue_on_connected();
 		break;
 	case MQTT_EVENT_DISCONNECTED:
+        event_queue_on_disconnected();
 
         xEventGroupClearBits(xLedEventGroup, BIT_STATUS_MQTT);
         xEventGroupSetBits(xLedEventGroup, BIT_STATUS_TRIGGER);
@@ -883,6 +885,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 		break;
 	case MQTT_EVENT_PUBLISHED:
 		ESP_LOGI(TAG, "MQTT published msg_id=%d", event->msg_id);
+		event_queue_on_published(event->msg_id);
 		break;
 	case MQTT_EVENT_DATA:
 
@@ -1187,6 +1190,7 @@ void app_main(void) {
 	//-------------------- NETWORK STACK -----------------------//
 	//----------------------------------------------------------//
 	nvs_flash_init();
+	event_queue_init();
 
 	esp_netif_init();
 	esp_event_loop_create_default();
