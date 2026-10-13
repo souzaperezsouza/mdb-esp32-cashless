@@ -393,6 +393,7 @@ void mdb_cashless_task(void *pvParameters) {
 
 			} else if (vend_approved_todo) {
 				vend_approved_todo = false;
+				pending_vend_since = 0;
 
 				mdb_payload[0] = 0x05;
 				mdb_payload[1] = item_price >> 8;
@@ -401,6 +402,7 @@ void mdb_cashless_task(void *pvParameters) {
 
 			} else if (vend_denied_todo) {
 				vend_denied_todo = false;
+				pending_vend_since = 0;
 
 				mdb_payload[0] = 0x06;
 				available_tx = 1;
@@ -623,6 +625,8 @@ void mdb_cashless_task(void *pvParameters) {
  *     dex:-            trigger an on-demand DEX/telemetry read
  *     info:-           publish device snapshot JSON on .../rpc/info
  *     credit:<amount>  grant credit (amount scaled to 1/100 units)
+ *     approve:<cents>  approve the pending VEND_REQUEST if <cents> is its exact price; "ok"/"fail" on .../rpc/confirm
+ *     deny:-           deny the pending VEND_REQUEST; "ok"/"fail" on .../rpc/confirm
  *     oos:-            send MDB "command out of sequence" to the VMC
  *     echo:-           reply <ts> on .../rpc/echo (liveness + RTT probe)
  *     buzzer:-         1s beep
@@ -960,6 +964,21 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
                 esp_mqtt_client_enqueue(mqtt_client, topic_confirm, "ok", 0, 1, 0, 1);
 				ESP_LOGI( TAG, "RPC credit: Amount= %lu cents", (unsigned long) mdb_to_cents(funds_available) );
+			} else if (strcmp(cmd, "approve") == 0 && has_args) {
+				// Only the vend the machine is waiting on, and only for the exact price it asked.
+				uint32_t cents = strtoul(args, NULL, 10);
+				bool ok = machine_state == VEND_STATE && pending_vend_since != 0 && !vend_denied_todo
+						&& cents == mdb_to_cents(pending_vend_price);
+				if (ok) vend_approved_todo = true;
+
+                esp_mqtt_client_enqueue(mqtt_client, topic_confirm, ok ? "ok" : "fail", 0, 1, 0, 1);
+				ESP_LOGI(TAG, "RPC approve %lu cents (item %u): %s", (unsigned long) cents, pending_vend_item, ok ? "ok" : "rejected");
+			} else if (strcmp(cmd, "deny") == 0) {
+				bool ok = machine_state == VEND_STATE && pending_vend_since != 0;
+				if (ok) vend_denied_todo = true;
+
+                esp_mqtt_client_enqueue(mqtt_client, topic_confirm, ok ? "ok" : "fail", 0, 1, 0, 1);
+				ESP_LOGI(TAG, "RPC deny: %s", ok ? "ok" : "nothing pending");
 			} else if (strcmp(cmd, "oos") == 0) {
 				out_of_sequence_todo = true;
 
