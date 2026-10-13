@@ -21,7 +21,7 @@ menu "MDB Cashless Device"
 
     choice
         prompt "Country / Currency Code"
-        default CURRENCY_UNKNOWN
+        default CURRENCY_BRL
 
         config CURRENCY_EUR
             bool "EUR - 0x0978"
