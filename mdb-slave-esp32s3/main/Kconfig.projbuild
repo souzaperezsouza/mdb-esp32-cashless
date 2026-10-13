@@ -71,6 +71,39 @@ menu "MDB Cashless Device"
 
 endmenu # MDB Cashless Device
 
+menu "MQTT Server"
+
+    config MQTT_BROKER_URI
+        string "Broker URI"
+        default "wss://seu-broker.onrender.com:443/mqtt"
+        help
+            mqtt://, mqtts://, ws:// or wss://. The TLS schemes (mqtts, wss)
+            verify the server certificate against the ESP-IDF certificate bundle.
+
+    config MQTT_USERNAME
+        string "Username (empty = device subdomain)"
+        default ""
+
+    config MQTT_PASSWORD
+        string "Password"
+        default ""
+
+    config MQTT_TOPIC_PREFIX
+        string "Outbound topic prefix"
+        default "maquinas"
+        help
+            The device publishes on <prefix>/<subdomain>/<event>
+            (sale, vend_fail, status, rpc/confirm, ...).
+
+    config MQTT_RPC_PREFIX
+        string "Inbound (RPC) topic prefix"
+        default "cmd"
+        help
+            The device subscribes to <prefix>/<subdomain>/# and runs the
+            signed commands published on <prefix>/<subdomain>/rpc.
+
+endmenu # MQTT Server
+
 menu "SIM7080G"
 
     choice

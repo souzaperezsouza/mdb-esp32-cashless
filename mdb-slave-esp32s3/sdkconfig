@@ -618,6 +618,16 @@ CONFIG_MDB_DECIMAL_PLACES=2
 # end of MDB Cashless Device
 
 #
+# MQTT Server
+#
+CONFIG_MQTT_BROKER_URI="wss://seu-broker.onrender.com:443/mqtt"
+CONFIG_MQTT_USERNAME=""
+CONFIG_MQTT_PASSWORD=""
+CONFIG_MQTT_TOPIC_PREFIX="maquinas"
+CONFIG_MQTT_RPC_PREFIX="cmd"
+# end of MQTT Server
+
+#
 # SIM7080G
 #
 # CONFIG_SIM7080G_CMNB_CATM is not set

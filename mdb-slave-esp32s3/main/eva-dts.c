@@ -15,6 +15,7 @@
 // Owned by the main translation unit.
 extern esp_mqtt_client_handle_t mqtt_client;
 extern char my_subdomain[];
+extern void mqtt_topic(char *buf, size_t size, const char *event);
 
 // DEX/DDCMP audit bytes are accumulated here before being published.
 static RingbufHandle_t dex_ringbuf;
@@ -449,8 +450,8 @@ static void eva_dts_task(void *arg) {
 	uint8_t *dex = (uint8_t*) xRingbufferReceive(dex_ringbuf, &dex_size, 0);
 
     if(dex != NULL){
-        char topic[64];
-        snprintf(topic, sizeof(topic), "domain.vmflow.xyz/%s/rpc/dex", my_subdomain);
+        char topic[96];
+        mqtt_topic(topic, sizeof(topic), "rpc/dex");
 
         esp_mqtt_client_publish(mqtt_client, topic, (char*) dex, dex_size, 0, 0);
         printf("%.*s", dex_size, (char*) dex);

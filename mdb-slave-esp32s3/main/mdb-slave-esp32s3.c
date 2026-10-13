@@ -113,6 +113,15 @@ static void wifi_retry_cb(void *arg) {
 char my_passkey[PASSKEY_LEN + 1];
 char my_subdomain[32];
 
+// Topics are configured in menuconfig (MQTT Server):
+//   outbound  <CONFIG_MQTT_TOPIC_PREFIX>/<subdomain>/<event>
+//   inbound   <CONFIG_MQTT_RPC_PREFIX>/<subdomain>/rpc
+#define TOPIC_LEN 96
+
+void mqtt_topic(char *buf, size_t size, const char *event) {
+	snprintf(buf, size, "%s/%s/%s", CONFIG_MQTT_TOPIC_PREFIX, my_subdomain, event);
+}
+
 enum MDB_COMMAND_FLOW {
 	RESET       = 0x00,
 	SETUP       = 0x01,
@@ -436,10 +445,10 @@ void mdb_cashless_task(void *pvParameters) {
 				ble_encode_with_passkey(0x0c, item_price, item_number, payload);
 				ble_notify_send((char*) payload, sizeof(payload));
 
-                char topic[64], msg[64], line[160];
+                char topic[TOPIC_LEN], msg[64], line[160];
                 snprintf(msg, sizeof(msg), "%u,%u:%lld", item_price, item_number, (long long) time(NULL));
                 rpc_sign_text(msg, line, sizeof(line));
-                snprintf(topic, sizeof(topic), "domain.vmflow.xyz/%s/vend_fail", my_subdomain);
+                mqtt_topic(topic, sizeof(topic), "vend_fail");
                 esp_mqtt_client_enqueue(mqtt_client, topic, line, 0, 1, 0, 1);
 
 				break;
@@ -464,11 +473,11 @@ void mdb_cashless_task(void *pvParameters) {
 
 				uint32_t price_wire = TO_SCALE_FACTOR( FROM_SCALE_FACTOR(item_price, CONFIG_MDB_SCALE_FACTOR, CONFIG_MDB_DECIMAL_PLACES), 1, 2);
 
-				char topic[64], msg[64], line[160];
+				char topic[TOPIC_LEN], msg[64], line[160];
 				snprintf(msg, sizeof(msg), "%lu:%u:%lld", (unsigned long) price_wire, item_number, (long long) time(NULL));
 				rpc_sign_text(msg, line, sizeof(line));
 
-				snprintf(topic, sizeof(topic), "domain.vmflow.xyz/%s/sale", my_subdomain);
+				mqtt_topic(topic, sizeof(topic), "sale");
 				esp_mqtt_client_enqueue(mqtt_client, topic, line, 0, 1, 0, 1);
 
 				ESP_LOGI( TAG, "CASH_SALE");
@@ -545,7 +554,7 @@ void mdb_cashless_task(void *pvParameters) {
 /*
  * Agent-facing interfaces (MQTT, every message signed with the per-device passkey).
  *
- * Inbound RPC — topic <sub>.vmflow.xyz/rpc, payload "<cmd>:<params>:<ts>:<hmac_hex>".
+ * Inbound RPC — topic <CONFIG_MQTT_RPC_PREFIX>/<sub>/rpc, payload "<cmd>:<params>:<ts>:<hmac_hex>".
  *   hmac = HMAC-SHA256(passkey, everything-before-the-last-colon) in lowercase hex;
  *   <ts> is Unix seconds, accepted only within RPC_FRESHNESS_SEC. <params> is fixed-width
  *   (never empty): commands without an argument send "-" as a sentinel. Commands:
@@ -644,11 +653,11 @@ void led_status_task(void *pvParameters) {
 }
 
 void ble_pax_event_handler(uint16_t devices_count){
-    char topic[64], msg[48], line[128];
+    char topic[TOPIC_LEN], msg[48], line[128];
     snprintf(msg, sizeof(msg), "%u:%lld", devices_count, (long long) time(NULL));
     rpc_sign_text(msg, line, sizeof(line));
 
-    snprintf(topic, sizeof(topic), "domain.vmflow.xyz/%s/paxcounter", my_subdomain);
+    mqtt_topic(topic, sizeof(topic), "paxcounter");
     esp_mqtt_client_enqueue(mqtt_client, topic, line, 0, 1, 0, 1);
 }
 
@@ -773,7 +782,7 @@ static void ota_task(void *arg) {
 static void rpc_publish_info(void) {
 	const esp_app_desc_t *app = esp_app_get_description();
 
-	char topic[64], json[384];
+	char topic[TOPIC_LEN], json[384];
 	int n = snprintf(json, sizeof(json),
 		"{\"version\":\"%s\",\"uptime_s\":%lld,"
 		"\"free_heap\":%lu,\"min_free_heap\":%lu,\"machine_state\":%d,"
@@ -789,7 +798,7 @@ static void rpc_publish_info(void) {
 		(long long) last_vend_success_time,
 		s_ip_wifi, s_ip_ppp);
 
-	snprintf(topic, sizeof(topic), "domain.vmflow.xyz/%s/rpc/info", my_subdomain);
+	mqtt_topic(topic, sizeof(topic), "rpc/info");
 	esp_mqtt_client_enqueue(mqtt_client, topic, json, n, 1, 0, 1);
 }
 
@@ -800,12 +809,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 	switch ((esp_mqtt_event_id_t) event_id) {
 	case MQTT_EVENT_CONNECTED:
 
-    	char topic[64], buf[32];
-    	snprintf(topic, sizeof(topic), "%s.vmflow.xyz/#", my_subdomain);
+    	char topic[TOPIC_LEN], buf[32];
+    	snprintf(topic, sizeof(topic), "%s/%s/#", CONFIG_MQTT_RPC_PREFIX, my_subdomain);
 
     	esp_mqtt_client_subscribe(mqtt_client, topic, 0);
 
-    	snprintf(topic, sizeof(topic), "domain.vmflow.xyz/%s/status", my_subdomain);
+    	mqtt_topic(topic, sizeof(topic), "status");
     	snprintf(buf, sizeof(buf), "online,%d", (int)esp_reset_reason());
     	esp_mqtt_client_enqueue(mqtt_client, topic, buf, 0, 1, 1, 1);
 
@@ -819,8 +828,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
 		break;
 	case MQTT_EVENT_SUBSCRIBED: {
-		char sub_topic[64];
-		snprintf(sub_topic, sizeof(sub_topic), "%s.vmflow.xyz/#", my_subdomain);
+		char sub_topic[TOPIC_LEN];
+		snprintf(sub_topic, sizeof(sub_topic), "%s/%s/#", CONFIG_MQTT_RPC_PREFIX, my_subdomain);
 		ESP_LOGI(TAG, "mqtt subscribed: %s", sub_topic);
 		break;
 	}
@@ -865,8 +874,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
 			bool has_args = (args[0] != '\0' && strcmp(args, "-") != 0);
 
-            char topic_confirm[64];
-            snprintf(topic_confirm, sizeof(topic_confirm), "domain.vmflow.xyz/%s/rpc/confirm", my_subdomain);
+            char topic_confirm[TOPIC_LEN];
+            mqtt_topic(topic_confirm, sizeof(topic_confirm), "rpc/confirm");
 
 			if (strcmp(cmd, "dex") == 0) {
 				request_telemetry_data(NULL);
@@ -889,8 +898,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                 esp_mqtt_client_enqueue(mqtt_client, topic_confirm, "ok", 0, 1, 0, 1);
 				ESP_LOGI(TAG, "RPC out-of-sequence queued");
 			} else if (strcmp(cmd, "echo") == 0) {
-				char topic[64], buf[24];
-				snprintf(topic, sizeof(topic), "domain.vmflow.xyz/%s/rpc/echo", my_subdomain);
+				char topic[TOPIC_LEN], buf[24];
+				mqtt_topic(topic, sizeof(topic), "rpc/echo");
 				snprintf(buf, sizeof(buf), "%u", ts);
 				esp_mqtt_client_enqueue(mqtt_client, topic, buf, 0, 0, 0, 1);
 				ESP_LOGI(TAG, "RPC echo");
@@ -1033,11 +1042,15 @@ static void sim7080g_task(void *pvParameters) {
     assert(dce);
 
     //-------------------------- MQTT --------------------------//
-    char lwt_topic[64];
-    snprintf(lwt_topic, sizeof(lwt_topic), "domain.vmflow.xyz/%s/status", my_subdomain);
+    char lwt_topic[TOPIC_LEN];
+    mqtt_topic(lwt_topic, sizeof(lwt_topic), "status");
 
     const esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = "mqtt://mqtt.vmflow.xyz",
+        .broker.address.uri = CONFIG_MQTT_BROKER_URI,
+        // wss:// and mqtts:// are checked against the ESP-IDF certificate bundle; ignored by mqtt:// and ws://.
+        .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
+        .credentials.username = CONFIG_MQTT_USERNAME[0] ? CONFIG_MQTT_USERNAME : my_subdomain,
+        .credentials.authentication.password = CONFIG_MQTT_PASSWORD[0] ? CONFIG_MQTT_PASSWORD : NULL,
         .session.last_will.topic = lwt_topic,
         .session.last_will.msg = "offline",
         .session.last_will.qos = 1,
