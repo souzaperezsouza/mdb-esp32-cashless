@@ -135,6 +135,18 @@ menu "MQTT Server"
 
 endmenu # MQTT Server
 
+menu "OTA"
+
+    config OTA_GITHUB_REPO
+        string "GitHub repository for OTA (owner/repo, empty = OTA off)"
+        default ""
+        help
+            The "ota" RPC downloads mdb-slave-esp32s3.bin from a release of this
+            repository (https://github.com/<owner/repo>/releases/...). Empty
+            disables OTA: the command is answered with "fail" on rpc/confirm.
+
+endmenu # OTA
+
 menu "SIM7080G"
 
     choice

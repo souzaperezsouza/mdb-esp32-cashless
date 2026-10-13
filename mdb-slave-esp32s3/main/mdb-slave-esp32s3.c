@@ -647,7 +647,7 @@ void mdb_cashless_task(void *pvParameters) {
  *     echo:-           reply <ts> on .../rpc/echo (liveness + RTT probe)
  *     buzzer:-         1s beep
  *     restart:-        ack on .../rpc/restart, then reboot
- *     ota:<tag>        pull app image from GitHub release (ota:- = latest, or pinned tag)
+ *     ota:<tag>        pull app image from a release of CONFIG_OTA_GITHUB_REPO (ota:- = latest, or pinned tag; off if empty)
  *                      over HTTPS; progress on .../rpc/ota, then reboot
  *
  * Outbound — signed text "<fields>:<ts>:<hmac_hex>":
@@ -1020,16 +1020,22 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 				vTaskDelay(pdMS_TO_TICKS(500));
 				esp_restart();
 			} else if (strcmp(cmd, "ota") == 0) {
-				// "ota:-" -> latest release; "ota:<tag>" -> pinned tag.
-				static char ota_url[160];
-				if (has_args)
-					snprintf(ota_url, sizeof(ota_url), "https://github.com/nodestark/mdb-esp32-cashless/releases/download/%s/mdb-slave-esp32s3.bin", args);
-				else
-					snprintf(ota_url, sizeof(ota_url), "https://github.com/nodestark/mdb-esp32-cashless/releases/latest/download/mdb-slave-esp32s3.bin");
+				// "ota:-" -> latest release; "ota:<tag>" -> pinned tag, from the GitHub repo set in
+				// menuconfig (CONFIG_OTA_GITHUB_REPO). Empty repo = OTA off.
+				static char ota_url[256];
+				if (CONFIG_OTA_GITHUB_REPO[0] == 0) {
+                esp_mqtt_client_enqueue(mqtt_client, topic_confirm, "fail", 0, 1, 0, 1);
+					ESP_LOGW(TAG, "RPC ota ignored: no OTA repository configured");
+				} else {
+					if (has_args)
+						snprintf(ota_url, sizeof(ota_url), "https://github.com/%s/releases/download/%s/mdb-slave-esp32s3.bin", CONFIG_OTA_GITHUB_REPO, args);
+					else
+						snprintf(ota_url, sizeof(ota_url), "https://github.com/%s/releases/latest/download/mdb-slave-esp32s3.bin", CONFIG_OTA_GITHUB_REPO);
 
                 esp_mqtt_client_enqueue(mqtt_client, topic_confirm, "ok", 0, 1, 0, 1);
-				ESP_LOGW(TAG, "RPC ota: %s", ota_url);
-				xTaskCreate(ota_task, "ota_task", 8192, ota_url, 5, NULL);
+					ESP_LOGW(TAG, "RPC ota: %s", ota_url);
+					xTaskCreate(ota_task, "ota_task", 8192, ota_url, 5, NULL);
+				}
 			} else {
 				ESP_LOGW(TAG, "RPC unknown command: %s", cmd);
 			}

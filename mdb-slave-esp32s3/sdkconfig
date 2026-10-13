@@ -631,6 +631,12 @@ CONFIG_EVENT_QUEUE_MAX=32
 # end of MQTT Server
 
 #
+# OTA
+#
+CONFIG_OTA_GITHUB_REPO=""
+# end of OTA
+
+#
 # SIM7080G
 #
 # CONFIG_SIM7080G_CMNB_CATM is not set
