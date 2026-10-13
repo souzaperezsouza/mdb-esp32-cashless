@@ -197,6 +197,12 @@ uint16_t last_sale_item = 0;
 
 time_t   last_vend_success_time = 0;
 
+// VEND_REQUEST waiting for the server (session with unknown funds). Written by
+// the MDB task, read by the MQTT task when approve/deny arrives.
+volatile uint16_t pending_vend_price = 0;   // MDB units
+volatile uint16_t pending_vend_item = 0;
+volatile time_t   pending_vend_since = 0;   // 0 = nothing pending
+
 static char s_ip_wifi[16] = "";
 static char s_ip_ppp[16]  = "";
 
@@ -450,6 +456,18 @@ void mdb_cashless_task(void *pvParameters) {
 					}
 				}
 
+				if (funds_available == 0xffff) {
+					// Unknown funds: the server charges the customer and answers approve/deny.
+					pending_vend_price = item_price;
+					pending_vend_item = item_number;
+					pending_vend_since = time(NULL);
+
+					char msg[64], line[160];
+					snprintf(msg, sizeof(msg), "%lu:%u:%lld", (unsigned long) mdb_to_cents(item_price), item_number, (long long) time(NULL));
+					rpc_sign_text(msg, line, sizeof(line));
+					event_queue_push("vend_request", line);
+				}
+
 				uint8_t payload[19];
 				ble_encode_with_passkey(0x0a, item_price, item_number, payload);
 				ble_notify_send((char*) payload, sizeof(payload));
@@ -613,7 +631,8 @@ void mdb_cashless_task(void *pvParameters) {
  *                      over HTTPS; progress on .../rpc/ota, then reboot
  *
  * Outbound — signed text "<fields>:<ts>:<hmac_hex>":
- *     sale  "<price>:<item>:<ts>:<hmac>"  on  .../sale
+ *     sale          "<price>:<item>:<ts>:<hmac>"  on  .../sale          (cash sale)
+ *     vend_request  "<price>:<item>:<ts>:<hmac>"  on  .../vend_request  (unknown-funds session: wants approve/deny)
  *     pax   "<count>:<ts>:<hmac>"         on  .../paxcounter
  *
  * BLE wire payload (phone app) — 19 bytes:
