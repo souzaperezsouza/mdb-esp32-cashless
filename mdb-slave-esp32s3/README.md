@@ -1,5 +1,7 @@
 # mdb-slave-esp32s3 — MDB Cashless Slave Firmware
 
+> **Fork:** this branch runs against your own MQTT server (approval per vend, persistent event queue, configurable broker/OTA). See [SERVIDOR-PROPRIO.md](SERVIDOR-PROPRIO.md) (Portuguese).
+
 ESP-IDF firmware that turns an **ESP32-S3** into an **MDB (Multi-Drop Bus) cashless device** for vending machines. The board acts as an MDB slave on the cashless peripheral address, granting credit and reporting sales/telemetry over Wi-Fi or cellular.
 
 > This is the device firmware. For the platform overview — dashboard, Android app, Supabase API and AI-agent control — see the [project README](../README.md). For the agent-facing command reference, see [AGENTS.md](../AGENTS.md).
@@ -12,7 +14,7 @@ ESP-IDF firmware that turns an **ESP32-S3** into an **MDB (Multi-Drop Bus) cashl
 ## What it does
 
 - **MDB cashless slave** — implements the cashless device session state machine (reset, setup, poll, vend) and answers the VMC on the configured peripheral address.
-- **Connectivity** — Wi-Fi STA, with an optional **SIM7080G** LTE-M/NB-IoT modem (PPP via `esp_modem`) as the cellular path. MQTT broker: `mqtt.vmflow.xyz`.
+- **Connectivity** — Wi-Fi STA, with an optional **SIM7080G** LTE-M/NB-IoT modem (PPP via `esp_modem`) as the cellular path. MQTT broker, credentials and topic prefixes: `menuconfig` → **MQTT Server** (`mqtt://`, `mqtts://`, `ws://` or `wss://`).
 - **BLE provisioning (NimBLE)** — the VMflow Android app registers the board, configures the Wi-Fi credentials, and sends credit over a signed 19-byte payload.
 - **Signed MQTT RPC** — remote control over MQTT, every message authenticated with the per-device passkey (HMAC-SHA256, replay-protected by a freshness window).
 - **EVA DTS** — on-demand DEX/DDCMP telemetry read.
@@ -27,7 +29,7 @@ The device tries Wi-Fi and the SIM7080G modem for an uplink; whichever comes up 
 
 All MQTT messages are signed: `"<cmd>[:<args>]:<ts>:<hmac_hex>"`, where `hmac = HMAC-SHA256(passkey, everything-before-the-last-colon)` and `<ts>` is Unix seconds, accepted only inside the freshness window.
 
-**Inbound** — topic `<sub>.vmflow.xyz/rpc`:
+**Inbound** — topic `<CONFIG_MQTT_RPC_PREFIX>/<sub>/rpc` (default `cmd/<sub>/rpc`):
 
 | Command | Action |
 |---------|--------|
@@ -38,13 +40,18 @@ All MQTT messages are signed: `"<cmd>[:<args>]:<ts>:<hmac_hex>"`, where `hmac = 
 | `echo` | reply `<ts>` on `.../rpc/echo` (liveness + RTT probe) |
 | `buzzer` | 1 s beep |
 | `restart` | ack on `.../rpc/restart`, then reboot |
-| `ota[:<tag>]` | pull app image from a GitHub release (latest, or pinned tag), then reboot |
+| `approve:<cents>` | approve the pending VEND_REQUEST if `<cents>` is its exact price (`ok`/`fail` on `.../rpc/confirm`) |
+| `deny` | deny the pending VEND_REQUEST |
+| `ota[:<tag>]` | pull app image from a release of `CONFIG_OTA_GITHUB_REPO` (latest, or pinned tag), then reboot; off when empty |
 
 **Outbound** — signed `"<fields>:<ts>:<hmac_hex>"`:
 
 | Topic | Payload |
 |-------|---------|
 | `.../sale` | `<price>:<item>:<ts>:<hmac>` |
+| `.../vend_request` | `<price>:<item>:<ts>:<hmac>` (unknown-funds session) |
+| `.../vend_success` | `<price>:<item>:<ts>:<hmac>` |
+| `.../vend_fail` | `<price_mdb>,<item>:<ts>:<hmac>` |
 | `.../paxcounter` | `<count>:<ts>:<hmac>` |
 | `.../status` | retained `online` / `offline` (LWT) |
 
@@ -94,6 +101,8 @@ Under **VMflow →**:
 
 - **MDB Cashless Device** — peripheral address (#1 `0x10` / #2 `0x60`), currency code, scale factor, decimal places.
 - **SIM7080G** — LTE network mode (Cat-M / NB-IoT / both) and APN.
+- **MQTT Server** — broker URI, username/password, topic prefixes, persistent event queue size.
+- **OTA** — GitHub `owner/repo` for the `ota` command (empty = OTA off).
 
 ## Source layout
 
