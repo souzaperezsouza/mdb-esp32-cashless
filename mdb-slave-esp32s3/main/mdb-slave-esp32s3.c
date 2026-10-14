@@ -541,7 +541,18 @@ void mdb_cashless_task(void *pvParameters) {
 			case VEND_CANCEL: {
 				if (read_9(NULL) != checksum) continue;
 
+				if (pending_vend_since != 0) {
+					// The VMC gave up before VEND APPROVED went out: tell the server, so it
+					// cancels the charge on the terminal (or refunds it if it was already paid).
+					char fields[32];
+					snprintf(fields, sizeof(fields), "%lu:%u",
+							(unsigned long) mdb_to_cents(pending_vend_price), pending_vend_item);
+					push_sale_event("vend_cancel", fields);
+				}
+				// An approve that arrived but was not sent yet must not go out after the cancel.
+				vend_approved_todo = false;
 				vend_denied_todo = true;
+				ESP_LOGI( TAG, "VEND_CANCEL");
 				break;
 			}
 			case VEND_SUCCESS: {
@@ -703,6 +714,7 @@ void mdb_cashless_task(void *pvParameters) {
  *     vend_request  "<price>:<item>:<ts>:<hmac>"  on  .../vend_request  (unknown-funds session: wants approve/deny)
  *     vend_success  "<price>:<item>:<ts>:<hmac>"  on  .../vend_success  (product released)
  *     vend_fail     "<price_mdb>,<item>:<ts>:<hmac>" on .../vend_fail  (price in MDB units)
+ *     vend_cancel   "<price>:<item>:<ts>:<hmac>"  on  .../vend_cancel   (VMC cancelled a VEND_REQUEST still waiting for the server)
  *     pax   "<count>:<ts>:<hmac>"         on  .../paxcounter
  *
  * BLE wire payload (phone app) — 19 bytes:

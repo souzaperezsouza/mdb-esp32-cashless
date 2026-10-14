@@ -230,6 +230,13 @@ int main(void) {
 	puback(next_msg_id - 1);
 	CHECK(event_queue_pending() == 0);
 
+	// 8. vend_cancel (VMC desistiu do pedido) passa pela fila como os outros eventos.
+	before = published_n;
+	push("vend_cancel", "350:12:5000:ab");
+	CHECK(published_n == before + 1 && !strcmp(published[before], "maquinas/42/vend_cancel 350:12:5000:ab"));
+	puback(next_msg_id - 1);
+	CHECK(event_queue_pending() == 0);
+
 	printf("event-queue: todos os testes passaram\n");
 	return 0;
 }

@@ -1,6 +1,6 @@
 #pragma once
 
-// Persistent queue for sales events (sale, vend_request, vend_success, vend_fail).
+// Persistent queue for sales events (sale, vend_request, vend_success, vend_fail, vend_cancel).
 //
 // Events are kept in NVS until the broker acknowledges them (QoS 1 PUBACK ->
 // MQTT_EVENT_PUBLISHED with the msg_id) and are resent on every (re)connect,

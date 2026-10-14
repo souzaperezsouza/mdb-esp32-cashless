@@ -82,13 +82,13 @@ menu "MDB Cashless Device"
 
     config VEND_APPROVAL_TIMEOUT_SEC
         int "Deny a VEND_REQUEST nobody approved after (seconds)"
-        default 70
+        default 130
         range 10 600
         help
             With funds unknown the device waits for approve/deny from the
             server. If neither arrives in time (server or internet down), the
             device denies on its own so the machine is not stuck. Keep it a
-            bit above the server's own approval timeout.
+            bit above the server's own approval timeout (120 s).
 
 endmenu # MDB Cashless Device
 

@@ -39,6 +39,7 @@ Assinadas: `<campos>:<ts>:<hmac>`, hmac = HMAC-SHA256(passkey, tudo antes do úl
 | `<prefixo>/<sub>/vend_request` | `<centavos>:<selecao>:<ts>:<hmac>` |
 | `<prefixo>/<sub>/vend_success` | `<centavos>:<selecao>:<ts>:<hmac>` |
 | `<prefixo>/<sub>/vend_fail` | `<preco_mdb>,<selecao>:<ts>:<hmac>` (preço na escala MDB, como no original) |
+| `<prefixo>/<sub>/vend_cancel` | `<centavos>:<selecao>:<ts>:<hmac>` (o VMC mandou VEND CANCEL com o pedido ainda esperando o servidor) |
 | `<prefixo>/<sub>/sale` | `<centavos>:<selecao>:<ts>:<hmac>` (venda em dinheiro) |
 | `<prefixo>/<sub>/status` | `online,<reset_reason>` / `offline` (last will), retidos, **não** assinados |
 | `<prefixo>/<sub>/rpc/confirm` | `ok` / `fail`, **não** assinado |
@@ -156,7 +157,7 @@ níveis são outros.
 | Recusa | `v 12 350`, servidor manda `deny` | VMC: `VEND DENIED`; sessão continua aberta |
 | Falha | `m f`, depois `v 12 350` + approve | VMC manda `VEND FAILURE`; broker recebe `vend_fail` |
 | Timeout | `m n`, `v 12 350`, sem approve | após `CONFIG_VEND_APPROVAL_TIMEOUT_SEC`: `VEND DENIED` |
-| Cancelamento | `v 12 350`, depois `x` | `VEND DENIED`; approve atrasado recebe `fail` |
+| Cancelamento | `v 12 350`, depois `x` | `VEND DENIED`; broker recebe `vend_cancel` `350:12:...`; approve atrasado recebe `fail` |
 | Dinheiro | `c 12 350` | broker recebe `sale` `350:12:...` |
 | Sessão reabre | após qualquer venda | `END SESSION` seguido de `BEGIN SESSION (funds unknown...)` |
 | Fila offline | desligue o Wi-Fi/broker, faça `c 12 350` duas vezes, reinicie o leitor, religue o broker | os dois `sale` chegam depois; `rpc/info` mostra `events_pending` voltando a 0 |
