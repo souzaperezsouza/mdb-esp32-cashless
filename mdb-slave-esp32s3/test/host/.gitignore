@@ -1,3 +1,5 @@
 test_event_queue
 test_event_queue.exe
 *.pdb
+test_display
+test_display.exe
