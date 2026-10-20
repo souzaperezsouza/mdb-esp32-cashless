@@ -38,6 +38,7 @@
 #include "eva-dts.h"
 #include "rpc-auth.h"
 #include "event-queue.h"
+#include "display.h"
 
 #define TAG "mdb_cashless"
 
@@ -191,6 +192,13 @@ bool vend_approved_todo = false;
 bool vend_denied_todo = false;
 bool cashless_reset_todo = false;
 bool out_of_sequence_todo = false;
+
+// What the VMC said about its display in SETUP CONFIG_DATA (0 x 0 = no display).
+static uint8_t vmc_feature_level = 0, vmc_display_columns = 0, vmc_display_rows = 0;
+// DISPLAY REQUEST waiting for the next POLL. Filled by the MQTT task ("display" RPC),
+// sent by the MDB task; the flag is set only after the buffer is complete.
+static uint8_t display_payload[DISPLAY_PAYLOAD_LEN];
+static volatile bool display_todo = false;
 
 uint16_t last_sale_price = 0;
 uint16_t last_sale_item = 0;
@@ -379,14 +387,21 @@ void mdb_cashless_task(void *pvParameters) {
 		case SETUP: {
 			switch (read_9(&checksum)) {
 			case CONFIG_DATA: {
-				uint8_t vmc_feature_level = read_9(&checksum);
-				uint8_t vmc_columns_on_display = read_9(&checksum);
-				uint8_t vmc_rows_on_display = read_9(&checksum);
-				uint8_t vmc_display_info = read_9(&checksum);
+				uint8_t feature_level = read_9(&checksum);
+				uint8_t columns_on_display = read_9(&checksum);
+				uint8_t rows_on_display = read_9(&checksum);
+				uint8_t display_info = read_9(&checksum);
 				
 				if (read_9(NULL) != checksum) continue;
 
 				machine_state = DISABLED_STATE;
+
+				vmc_feature_level = feature_level;
+				vmc_display_columns = columns_on_display;
+				vmc_display_rows = rows_on_display;
+				// Bench check for the "display" RPC: 0 x 0 here means the VMC has no display for us.
+				ESP_LOGI(TAG, "VMC setup: feature level %u, display %ux%u, display info 0x%02x",
+						feature_level, columns_on_display, rows_on_display, display_info);
 
 				mdb_payload[0] = 0x01;
 				mdb_payload[1] = 1;
@@ -468,6 +483,12 @@ void mdb_cashless_task(void *pvParameters) {
 				machine_state = ENABLED_STATE;
 
 				open_unknown_funds_session();
+
+			} else if (display_todo) {
+				memcpy(mdb_payload, display_payload, DISPLAY_PAYLOAD_LEN);
+				available_tx = DISPLAY_PAYLOAD_LEN;
+				display_todo = false;
+				ESP_LOGI(TAG, "DISPLAY REQUEST sent (%u x 0.1 s)", mdb_payload[1]);
 
 			} else if (out_of_sequence_todo) {
 				out_of_sequence_todo = false;
@@ -702,6 +723,9 @@ void mdb_cashless_task(void *pvParameters) {
  *     credit:<amount>  grant credit (amount scaled to 1/100 units)
  *     approve:<cents>  approve the pending VEND_REQUEST if <cents> is its exact price; "ok"/"fail" on .../rpc/confirm
  *     deny:-           deny the pending VEND_REQUEST; "ok"/"fail" on .../rpc/confirm
+ *     display:<32 chars>,<s>  show 2 lines of 16 on the VMC display for <s> seconds (1-25) with a
+ *                      DISPLAY REQUEST on the next POLL; ignored (logged) if the VMC declared no display
+ *                      in SETUP. No rpc/confirm.
  *     oos:-            send MDB "command out of sequence" to the VMC
  *     echo:-           reply <ts> on .../rpc/echo (liveness + RTT probe)
  *     buzzer:-         1s beep
@@ -1059,6 +1083,19 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
                 esp_mqtt_client_enqueue(mqtt_client, topic_confirm, ok ? "ok" : "fail", 0, 1, 0, 1);
 				ESP_LOGI(TAG, "RPC deny: %s", ok ? "ok" : "nothing pending");
+			} else if (strcmp(cmd, "display") == 0 && has_args) {
+				// No rpc/confirm on purpose: the server reads a bare "ok" there as the approve's.
+				uint8_t payload[DISPLAY_PAYLOAD_LEN];
+				if (vmc_display_columns == 0 || vmc_display_rows == 0) {
+					ESP_LOGW(TAG, "RPC display ignored: the VMC declared no display in SETUP (%ux%u, level %u)",
+							vmc_display_columns, vmc_display_rows, vmc_feature_level);
+				} else if (display_build(args, vmc_display_columns, vmc_display_rows, payload) == 0) {
+					ESP_LOGW(TAG, "RPC display rejected: malformed args");
+				} else {
+					memcpy(display_payload, payload, sizeof(payload));
+					display_todo = true;
+					ESP_LOGI(TAG, "RPC display queued for the next POLL (%ux%u)", vmc_display_columns, vmc_display_rows);
+				}
 			} else if (strcmp(cmd, "oos") == 0) {
 				out_of_sequence_todo = true;
 

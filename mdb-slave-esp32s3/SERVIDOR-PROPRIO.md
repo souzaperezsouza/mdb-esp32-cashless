@@ -46,7 +46,10 @@ Assinadas: `<campos>:<ts>:<hmac>`, hmac = HMAC-SHA256(passkey, tudo antes do úl
 | `<prefixo>/<sub>/rpc/info` | JSON; agora com `events_pending`, `events_dropped`, `clock_synced` e `time` |
 
 Comandos (tópico `<prefixo_rpc>/<sub>/rpc`, `<cmd>:<args>:<ts>:<hmac>`, ts com no
-máximo 10 s de diferença do relógio da placa):
+máximo 10 s de diferença do relógio da placa). `display:<32 caracteres>,<segundos>`
+(fidelidade) pede pro VMC mostrar 2 linhas de 16 com um DISPLAY REQUEST no próximo
+POLL; não responde em `rpc/confirm`. Se o VMC disse no SETUP que não tem display
+(log `VMC setup: ... display 0x0`), a placa ignora e loga. Os comandos:
 
 | Comando | Efeito |
 |---|---|
